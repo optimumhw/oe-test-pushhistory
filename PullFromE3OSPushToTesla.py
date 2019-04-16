@@ -408,8 +408,9 @@ if __name__ == '__main__':
     configHelper = ConfigurationHelper()
     configSettings = configHelper.getConfigSettings()
 
-    fromDateString = '2017-11-01T00:00:00.000Z'
-    toDateString = '2017-11-02T23:59:55.000Z'
+    fromDateString = '2019-01-01T00:00:00.000Z'
+    toDateString = '2010-01-15T23:59:55.000Z'
+    pointsListFileName = 'BofA_HJ_PodA.xlsx'
     qualifier = 'BOA.BoAHJCP.BoAPDAEDGE.BoAPDAEDGE.'
 
     #=====================================================================
