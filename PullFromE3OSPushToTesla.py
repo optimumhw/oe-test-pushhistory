@@ -10,51 +10,15 @@ import xlrd
 import sys
 
 
-class ConfigurationHelper:
-    def __init__(self):
-
-        try:
-            self.configDirPath = os.environ['EDGE_PYTHON_SCRIPTS_CONFIG_HOME'].strip()
-        except:
-            print
-
-            self.configDirPath = '/Users/halwilkinson/Desktop/EdgePythonScriptsConfig'  # home
-            # self.configDirPath = '/Users/hal/Desktop/PythonScriptConfigDir' #work
-            print 'could not read EDGE_PYTHON_SCRIPTS_CONFIG_HOME env variable. using instead: ' + self.configDirPath
-            pass
-
-        try:
-            configFilePath = os.path.join(self.configDirPath, 'config.txt')
-            configFile = open(configFilePath, 'r')
-            configLines = configFile.read().splitlines()
-            configFile.close()
-
-            self.configSettings = {}
-            for line in configLines:
-                if len(line) <= 0:
-                    continue
-                keyAndValue = line.split('=')
-                self.configSettings[keyAndValue[0]] = keyAndValue[1]
-
-        except:
-            logError('config.txt file i/o error. quitting')
-
-    def getConfigSettings(self):
-        return self.configSettings
-
-    def getConfigDirPath(self):
-        return self.configDirPath
-
-
 class E3OSHelper():
 
-    def __init__(self, configSettings, configDirPath, pointsListFileName):
+    def __init__(self, pointsListFileName):
 
         self.e3osSqlHost = os.environ['E3OS_SQL_HOST']
         self.e3osSqlUser = os.environ['E3OS_SQL_USER']
         self.e3osSqlPassword = os.environ['E3OS_SQL_PASSWORD']
+        self.configDirPath = os.environ['SPREADSHEETS_FOLDER']
 
-        self.configDirPath = configDirPath
         self.headers = {'content-type': 'application/json'}
 
         excelFilPath = os.path.join(self.configDirPath, pointsListFileName)
@@ -122,6 +86,7 @@ class E3OSHelper():
     def getDataInRows(self, qualifier, pointsAndTypes, fromDateString, toDateString):
 
         queryString = '''
+        use oemvmdata;
         declare @DataPointsOfInterest fact.datapointsofinterest
             insert @DataPointsOfInterest (seqNbr, DataPointXID)
 
@@ -133,7 +98,7 @@ class E3OSHelper():
            , @TimeInterval = 'minute'
            , @UserName = 'tkitchen'
            , @IncludeOutOfBounds = false
-           , @IncludeUncommissioned = false
+           , @IncludeUncommissioned = true
            , @UserId = '1d355ea9-7b16-4822-9483-1dd34173b5b8'
            , @TimeRange = null
         delete @DataPointsOfInterest
@@ -142,18 +107,21 @@ class E3OSHelper():
         try:
             conn = pymssql.connect(host=self.e3osSqlHost, user=self.e3osSqlUser,
                                    password=self.e3osSqlPassword, as_dict=True, database='oemvmdata')
+
+            cur = conn.cursor()
+            cur.execute(queryString)
+
+            rowCount = 0
+            rows = []
+            for row in cur:
+                rowCount += 1
+                rows.append(row)
+
         except Exception, e:
             logError("could not connect to sql: " + str(e))
-        cur = conn.cursor()
-        cur.execute(queryString)
 
-        rowCount = 0
-        rows = []
-        for row in cur:
-            rowCount += 1
-            rows.append(row)
-
-        conn.close()
+        finally:
+            conn.close()
 
         return self.private_transformRowData(rowCount, rows)
 
@@ -219,27 +187,28 @@ class TeslaHelperClass():
         url = self.tesla_host + "/oauth/token"
 
         headers = {}
-        headers['content-type'] = 'application/x-www-form-urlencoded'
+        headers['content-type'] = 'application/json'
 
         dict = {}
-        dict['grant_type'] = 'password'
-        dict['email'] = self.username
-        dict['password'] = self.password
+        dict['grantType'] = 'password'
+        dict['email'] = self.tesla_user
+        dict['password'] = self.tesla_password
 
-        payload = urllib.urlencode(dict)
+        payload = json.dumps(dict)
+        payload = json.loads(payload)
 
         try:
-            resp = requests.post(url, data=payload, headers=headers)
+            resp = requests.post(url, json=payload, headers=headers)
             dict = json.loads(resp.text)
 
         except Exception, e:
             print e
 
         if resp.status_code != 200:
-            msg = "Can't get token! host= " + self.host
+            msg = "Can't get token! host= " + self.tesla_host
             self.fatalError(msg, resp)
 
-        self.tok = dict['access_token']
+        self.tok = dict['accessToken']
 
     def getTeslaPointsList(self):
 
@@ -248,7 +217,7 @@ class TeslaHelperClass():
         headers['content-type'] = 'application/json'
         headers['Authorization'] = 'Bearer ' + self.tok
 
-        url = self.tesla_host + '/stations?%s' % self.stationId
+        url = self.tesla_host + '/stations/%s' % self.stationId
 
         resp = requests.get(url, headers=headers)
 
@@ -266,9 +235,23 @@ class TeslaHelperClass():
 
         map = {}
         for dp in datapoints:
-            map[dp[name]] = dp[id]
+            map[dp['shortName']] = dp['id']
 
         return map
+
+
+    def  allPointsExistInTesla(self, pointAndTypes, teslaPointNameToIdMap):
+        foundAllPoints = True
+        for pt in pointsAndTypes:
+            temp = pt['edisonPointName']
+            if len(temp) == 0:
+                temp = pt['e3osPointName']
+
+            if not temp in teslaPointNameToIdMap:
+                print temp + ' not found'
+                foundAllPoints = False
+        return foundAllPoints
+
 
 
     def postHistory(self, pointsAndTypes, timestamps, timeStampsAndValues):
@@ -277,7 +260,8 @@ class TeslaHelperClass():
         teslaPointNameToIdMap = self.getNameToIdMap(teslaPointsList)
 
         print 'Checking that all points exist in tesla...'
-        #tbd
+        if not self.allPointsExistInTesla( pointsAndTypes, teslaPointNameToIdMap ):
+            return
 
         pointToTypeMap = {}
         for pt in pointsAndTypes:
@@ -352,7 +336,6 @@ class TeslaHelperClass():
             if len(points) > 0:
                 self.private_postSlice(points)
 
-
     def private_postSlice(self, points):
 
         reqBody = {}
@@ -401,22 +384,15 @@ def logError(msg='error'):
 
 if __name__ == '__main__':
 
-
-    lastSuccessTimestamp = datetime.datetime.now()
-    lastSuccessTimestampString = lastSuccessTimestamp.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
-
-    configHelper = ConfigurationHelper()
-    configSettings = configHelper.getConfigSettings()
-
-    fromDateString = '2019-01-01T00:00:00.000Z'
-    toDateString = '2010-01-15T23:59:55.000Z'
+    fromDateString = '2019-01-27T00:00:00.000Z'
+    toDateString = '2019-02-15T23:59:55.000Z'
     pointsListFileName = 'BofA_HJ_PodA.xlsx'
     qualifier = 'BOA.BoAHJCP.BoAPDAEDGE.BoAPDAEDGE.'
 
     #=====================================================================
 
     print 'Connecting to sql...'
-    e3oshelper = E3OSHelper(configSettings, configHelper.getConfigDirPath(), pointsListFileName)
+    e3oshelper = E3OSHelper(pointsListFileName)
 
     print 'Getting points list from Excel..'
     pointsAndTypes = e3oshelper.getPointsAndTypesFromExcel()
