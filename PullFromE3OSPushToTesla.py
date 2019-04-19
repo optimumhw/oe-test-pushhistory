@@ -4,105 +4,34 @@ import datetime
 import pymssql
 import requests
 import json
-import urllib
 import os
-import xlrd
-import sys
 
 
 class E3OSHelper():
 
-    def __init__(self, pointsListFileName):
+    def __init__(self ):
 
         self.e3osSqlHost = os.environ['E3OS_SQL_HOST']
         self.e3osSqlUser = os.environ['E3OS_SQL_USER']
         self.e3osSqlPassword = os.environ['E3OS_SQL_PASSWORD']
-        self.configDirPath = os.environ['SPREADSHEETS_FOLDER']
 
         self.headers = {'content-type': 'application/json'}
 
-        excelFilPath = os.path.join(self.configDirPath, pointsListFileName)
-        workbook = xlrd.open_workbook(excelFilPath)
-        pointNameSheet = workbook.sheet_by_name('Points')
-
-        self.pointsNameAndTypeList = []
-        isFirstRow = True
-        for rowNumber in range(0, pointNameSheet.nrows):
-
-            # skip the header row - make sure there is a  header row
-            if isFirstRow:
-                isFirstRow = False
-                continue
-
-            includeCellObj = pointNameSheet.cell(rowNumber, 0)
-            e3osPointNameCellObj = pointNameSheet.cell(rowNumber, 1)
-            pointTypeCellObj = pointNameSheet.cell(rowNumber, 2)
-            edisonPointNameCellObj = pointNameSheet.cell(rowNumber, 3)
-
-            includeFlag = includeCellObj.value
-            e3osPointName = e3osPointNameCellObj.value
-            pointType = pointTypeCellObj.value
-            edisonPointName = edisonPointNameCellObj.value
-
-            if includeFlag == 0:
-                continue
-
-            dict = {}
-            if e3osPointName is None or len(e3osPointName) == 0:
-                dict['e3osPointName'] = edisonPointName
-            else:
-                dict['e3osPointName'] = e3osPointName
-
-            dict['pointType'] = pointType
-            dict['edisonPointName'] = edisonPointName
-
-            if len(dict['edisonPointName']) <= 0:
-                print "empty line at row: ", rowNumber
-
-            else:
-                self.pointsNameAndTypeList.append(dict)
-
-    def getPointsAndTypesFromExcel(self):
-        return self.pointsNameAndTypeList
 
     # ========= GET Data from SQL ==================================
-    def private_getTableString(self, qualifier, pointsAndTypes):
-        index = 1
-        tableString = ""
+    def getE3OSPointsList(self, e3osStationId):
 
-        for pointAndType in pointsAndTypes:
-            if len(tableString) > 0:
-                tableString += ' union all \n '
-
-            pointName = pointAndType['e3osPointName']
-
-            # rowString = "select %s, '%s%s'" % ( str(index), qualifier, pointName )
-            rowString = "select " + str(index) + ", '" + qualifier + pointName + "'"
-            index += 1
-            tableString += rowString
-
-        return tableString
-
-    def getDataInRows(self, qualifier, pointsAndTypes, fromDateString, toDateString):
 
         queryString = '''
-        use oemvmdata;
-        declare @DataPointsOfInterest fact.datapointsofinterest
-            insert @DataPointsOfInterest (seqNbr, DataPointXID)
-
-        %s
-
-        exec fact.DataSeriesGet2 @DataPointsOfInterest = @DataPointsOfInterest
-           , @FromTime_Local = '%s'
-           , @ToTime_Local = '%s'
-           , @TimeInterval = 'minute'
-           , @UserName = 'tkitchen'
-           , @IncludeOutOfBounds = false
-           , @IncludeUncommissioned = true
-           , @UserId = '1d355ea9-7b16-4822-9483-1dd34173b5b8'
-           , @TimeRange = null
-        delete @DataPointsOfInterest
-        ''' % (self.private_getTableString(qualifier, pointsAndTypes), fromDateString, toDateString)
+            use oemvm;
+            SELECT [DataPointName]
+                  ,[DataPointXID]
+                  ,[PointType]
+                  ,[CreateTime]
+                  ,[DisplayName]
+              FROM [oemvm].[dim].[DataPoint_List]
+              where StationID=%s
+        ''' % e3osStationId
 
         try:
             conn = pymssql.connect(host=self.e3osSqlHost, user=self.e3osSqlUser,
@@ -123,17 +52,71 @@ class E3OSHelper():
         finally:
             conn.close()
 
-        return self.private_transformRowData(rowCount, rows)
+        return rows
+
+    def private_getTableString(self, qualifier, xids):
+        index = 1
+        tableString = ""
+
+        for xid in xids:
+            if len(tableString) > 0:
+                tableString += ' union all \n '
+
+            # rowString = "select %s, '%s%s'" % ( str(index), qualifier, e3osPointName )
+            rowString = "select " + str(index) + ", '" + xid + "'"
+            index += 1
+            tableString += rowString
+
+        return tableString
+
+    def getDataInRows(self, e3osPointNames, fromDateString, toDateString):
+
+        queryString = '''
+        use oemvmdata;
+        declare @DataPointsOfInterest fact.datapointsofinterest
+            insert @DataPointsOfInterest (seqNbr, DataPointXID)
+
+        %s
+
+        exec fact.DataSeriesGet2 @DataPointsOfInterest = @DataPointsOfInterest
+           , @FromTime_Local = '%s'
+           , @ToTime_Local = '%s'
+           , @TimeInterval = 'minute'
+           , @UserName = 'tkitchen'
+           , @IncludeOutOfBounds = false
+           , @IncludeUncommissioned = true
+           , @UserId = '1d355ea9-7b16-4822-9483-1dd34173b5b8'
+           , @TimeRange = null
+        delete @DataPointsOfInterest
+        ''' % (self.private_getTableString(e3osPointNames), fromDateString, toDateString)
+
+        try:
+            conn = pymssql.connect(host=self.e3osSqlHost, user=self.e3osSqlUser,
+                                   password=self.e3osSqlPassword, as_dict=True, database='oemvmdata')
+
+            cur = conn.cursor()
+            cur.execute(queryString)
+
+            rowCount = 0
+            rows = []
+            for row in cur:
+                rowCount += 1
+                rows.append(row)
+
+        except Exception, e:
+            logError("could not connect to sql: " + str(e))
+
+        finally:
+            conn.close()
+
+        return self.private_transformRowData( len(xids), rows)
 
     # ============= Transform =======================
 
-    def private_transformRowData(self, rowCount, rows):
+    def private_transformRowData(self, numPoints, rows):
 
         timeStampsAndValues = {}
         timeStamps = []
-
-        pointsAndTypes = self.getPointsAndTypesFromExcel()
-        numPoints = len(pointsAndTypes)
 
         for row in rows:
 
@@ -157,6 +140,7 @@ class E3OSHelper():
 
         return (timeStamps, timeStampsAndValues)
 
+    '''
     def dumpTimestampsAndValues(self, pointsAndTypes, timestamps, timeStampsAndValues):
         print 'Timestamp ',
         for pointNameAndType in pointsAndTypes:
@@ -171,6 +155,7 @@ class E3OSHelper():
                 print val,
                 print ' ',
             print
+    '''
 
     # ===============================
 
@@ -210,6 +195,33 @@ class TeslaHelperClass():
 
         self.tok = dict['accessToken']
 
+    def setToken(self):
+        url = self.tesla_host + "/oauth/token"
+
+        headers = {}
+        headers['content-type'] = 'application/json'
+
+        dict = {}
+        dict['grantType'] = 'password'
+        dict['email'] = self.tesla_user
+        dict['password'] = self.tesla_password
+
+        payload = json.dumps(dict)
+        payload = json.loads(payload)
+
+        try:
+            resp = requests.post(url, json=payload, headers=headers)
+            dict = json.loads(resp.text)
+
+        except Exception, e:
+            print e
+
+        if resp.status_code != 200:
+            msg = "Can't get token! host= " + self.tesla_host
+            self.fatalError(msg, resp)
+
+        self.tok = dict['accessToken']
+
     def getTeslaPointsList(self):
 
         headers = {}
@@ -217,18 +229,16 @@ class TeslaHelperClass():
         headers['content-type'] = 'application/json'
         headers['Authorization'] = 'Bearer ' + self.tok
 
-        url = self.tesla_host + '/stations/%s' % self.stationId
+        url = self.tesla_host + '/stations/%s/data-points' % self.stationId
 
         resp = requests.get(url, headers=headers)
 
         if resp.status_code != 200:
             print "Could not get points"
 
-        dict = json.loads(resp.text)
+        listOfPoints = json.loads(resp.text)
 
-        datapoints = dict["dataPoints"]
-
-        return datapoints
+        return listOfPoints
 
 
     def getNameToIdMap(self, datapoints):
@@ -240,35 +250,45 @@ class TeslaHelperClass():
         return map
 
 
-    def  allPointsExistInTesla(self, pointAndTypes, teslaPointNameToIdMap):
-        foundAllPoints = True
-        for pt in pointsAndTypes:
-            temp = pt['edisonPointName']
-            if len(temp) == 0:
-                temp = pt['e3osPointName']
+    def createMappingTable(self, e3osPointsList, teslaPointsList ):
+        mappingTable = []
 
-            if not temp in teslaPointNameToIdMap:
-                print temp + ' not found'
-                foundAllPoints = False
-        return foundAllPoints
+        for e3osPoint in e3osPointsList:
+            #if not e3osPoint['PointType'] == 'BAS' :
+            #    continue
+            mappingTableRow = {}
+            mappingTableRow['status'] = 'B_noTesla'
+            mappingTableRow['e3osPointName'] = e3osPoint['DataPointName']
+            mappingTableRow['e3osType'] = e3osPoint['PointType']
+            mappingTableRow['xid'] = e3osPoint['DataPointXID']
+            mappingTableRow['telsaPointName'] = ''
+            mappingTableRow['telsaPointType'] = ''
+            mappingTable.append(mappingTableRow)
 
 
+        for teslaPoint in teslaPointsList:
+            foundIt = False
+            for mtRow in mappingTable:
+                if mtRow['e3osPointName'] == teslaPoint['shortName']:
+                    mtRow['status'] = 'A_mapped'
+                    mtRow['telsaPointName'] = teslaPoint['shortName']
+                    mtRow['telsaPointType'] = teslaPoint['type']
+                    foundIt = True
 
-    def postHistory(self, pointsAndTypes, timestamps, timeStampsAndValues):
+            if not foundIt:
+                mappingTableRow = {}
+                mappingTableRow['status'] = 'C_noE3OS'
+                mappingTableRow['e3osPointName'] = ''
+                mappingTableRow['e3osType'] = ''
+                mappingTableRow['xid'] = ''
+                mappingTableRow['telsaPointName'] = teslaPoint['shortName']
+                mappingTableRow['telsaPointType'] = teslaPoint['type']
+                mappingTable.append(mappingTableRow)
 
-        teslaPointsList = self.getTeslaPointsList()
-        teslaPointNameToIdMap = self.getNameToIdMap(teslaPointsList)
 
-        print 'Checking that all points exist in tesla...'
-        if not self.allPointsExistInTesla( pointsAndTypes, teslaPointNameToIdMap ):
-            return
+        return mappingTable
 
-        pointToTypeMap = {}
-        for pt in pointsAndTypes:
-            temp = pt['edisonPointName']
-            if len(temp) == 0:
-                temp = pt['e3osPointName']
-            pointToTypeMap[temp] = pt['pointType']
+    def postHistory(self, e3osMappedPointNames, timestamps, timeStampsAndValues):
 
         firstDay = None
 
@@ -296,28 +316,19 @@ class TeslaHelperClass():
 
             maxPointsToPush = 50
 
-            for pointAndTypeName in pointsAndTypes:
-
-                pointName = pointAndTypeName['edisonPointName']
-                if not pointName or len(pointName) == 0:
-                    pointName = pointAndTypeName['e3osPointName']
-
-                pointType = pointToTypeMap[pointName]
+            for pointName in e3osMappedPointNames:
 
                 teslaId = teslaPointNameToIdMap[pointName]
-
-                if pointType != 'boolean' and pointType != 'numeric':
-                    print 'yikes, bad point type for:', pointName, 'type:', pointType
 
                 temp = valuesForAllPoints[pointIndex]
 
                 if temp is not None:
-                    if pointType == 'boolean':
+                    if isinstance(temp, bool):
                         if temp > 0:
                             val = 1.0
                         else:
                             val = 0.0
-                    elif pointType == 'string':
+                    elif isinstance(temp, str):
                         val = temp
                     else:
                         val = float(temp)
@@ -338,24 +349,38 @@ class TeslaHelperClass():
 
     def private_postSlice(self, points):
 
-        reqBody = {}
-        reqBody['list_of_points'] = points
-        payload = json.dumps(reqBody)
 
+        payload = json.dumps(points)
+        payload = json.loads(payload)
         headers = {}
         headers['Accept'] = 'application/json'
         headers['content-type'] = 'application/json'
         headers['Authorization'] = 'Bearer ' + self.tok
 
-        url = self.host + '/data/upsert'
+        url = self.tesla_host + '/data/upsert'
 
-        resp = requests.post(url, data=payload, headers=headers)
+        resp = requests.post(url, json=payload, headers=headers)
 
         # self.printPostInfo(url, headers, payload)
 
-        if resp.status_code != 200:
-            print "Could not post slice - ", resp.status_code
-            print str(points)
+        if resp.status_code >= 300:
+            self.setToken()
+            resp = requests.post(url, json=payload, headers=headers)
+            if resp.status_code >= 300:
+                print "Could not post slice - ", resp.status_code
+                print str(points)
+
+
+    '''  
+    def postSparsePointValues(self):
+        
+    MinimumChilledWaterFlow("MinimumChilledWaterFlow", "MinimumChilledWaterFlow"), 606.0
+    TotalCapacity("TotalCapacity", "TotalCapacity"), 1400.0
+    UtilityRate("BlendedUtilityRate", "UtilityRate"), 0.105
+    CO2Rate("CO2EmissionFactor", "CO2Rate"); 1.0547
+    '''
+
+
 
     def printPostInfo(self, url, headers, payload):
         print 'POST INFO'
@@ -384,23 +409,43 @@ def logError(msg='error'):
 
 if __name__ == '__main__':
 
-    fromDateString = '2019-01-27T00:00:00.000Z'
-    toDateString = '2019-02-15T23:59:55.000Z'
-    pointsListFileName = 'BofA_HJ_PodA.xlsx'
-    qualifier = 'BOA.BoAHJCP.BoAPDAEDGE.BoAPDAEDGE.'
+
+    fromDateString = os.environ['FROM_DATE']
+    toDateString = os.environ['TO_DATE']
+    e3osStationId = os.environ['E3OS_STATION_ID']
 
     #=====================================================================
 
     print 'Connecting to sql...'
-    e3oshelper = E3OSHelper(pointsListFileName)
+    e3oshelper = E3OSHelper()
 
-    print 'Getting points list from Excel..'
-    pointsAndTypes = e3oshelper.getPointsAndTypesFromExcel()
-    if len(pointsAndTypes) <= 0:
-        logError('pointsAndTypes dict is empty')
+    print 'Getting datapoints from e3os'
+    e3osPointsList = e3oshelper.getE3OSPointsList(e3osStationId)
+
+    print 'Getting auth token from tesla...'
+    teslaHelper = TeslaHelperClass()
+
+    print 'Getting points list from tesla...'
+    teslaPointsList = teslaHelper.getTeslaPointsList()
+    teslaPointNameToIdMap = teslaHelper.getNameToIdMap(teslaPointsList)
+
+    print 'create mapping table...'
+    mappingTable = teslaHelper.createMappingTable(e3osPointsList, teslaPointsList)
+
+    print 'status,e3osPointName,e3osType,telsaPointName,telsaPointType'
+    for mtRow in mappingTable:
+        print mtRow['status'] + ',' + mtRow['e3osPointName'] + ',' + mtRow['e3osType'] + ',' + mtRow[
+            'telsaPointName'] + ',' + mtRow['telsaPointType']
+
+    e3osMappedPointNames = []
+    xids = []
+    for mtRow in mappingTable:
+        if mtRow['status'] == 'A_mapped' and mtRow['telsaPointType'] == 'raw':
+            e3osMappedPointNames.append(mtRow['e3osPointName'])
+            xids.append(mtRow['xid'])
 
     print 'Getting data from e3os...'
-    timestamps, timestampsAndValues = e3oshelper.getDataInRows(qualifier, pointsAndTypes, fromDateString, toDateString)
+    timestamps, timestampsAndValues = e3oshelper.getDataInRows(xids, fromDateString, toDateString)
     if len(timestamps) <= 0:
         logError('no data from sql')
 
@@ -411,11 +456,8 @@ if __name__ == '__main__':
     pushStartTimeString = pushStartTime.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
     print 'Starting push at: ' + pushStartTimeString
 
-    print 'Getting auth token...'
-    teslaHelper = TeslaHelperClass()
-
     print 'Posting data...'
-    teslaHelper.postHistory(pointsAndTypes, timestamps, timestampsAndValues)
+    teslaHelper.postHistory(e3osMappedPointNames, timestamps, timestampsAndValues)
 
     pushEndTime = datetime.datetime.now()
     pushEndTimeString = pushEndTime.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
